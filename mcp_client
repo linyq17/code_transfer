@@ -1,6 +1,7 @@
 import asyncio
-from fastmcp import Client
 import random
+import warnings
+from fastmcp import Client
 
 
 class OsworldMcpClient:
@@ -20,33 +21,48 @@ class OsworldMcpClient:
             },
             "git": {
                 "command": "uvx",
-                "args": [
-                    "mcp-server-git"
-                ]
+                "args": ["mcp-server-git"]
             }
         }
     }
 
-    # ---------- internal helper ----------
+    # -----------------------------
+    # Internal helper: run safely
+    # -----------------------------
     @staticmethod
     def _run(coro):
-        """
-        Safely run an async coroutine, even if a loop already exists (e.g. in Jupyter).
-        """
+        """Run a coroutine safely and suppress closed-loop warnings."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
 
         if loop and loop.is_running():
-            # If inside a running loop (e.g. notebook), create a new one in a thread-safe way
             return asyncio.run_coroutine_threadsafe(coro, loop).result()
-        else:
-            return asyncio.run(coro)
 
-    # ---------- tools ----------
+        # Suppress “Event loop is closed” cleanup warnings
+        warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*Event loop is closed.*")
+
+        # Use a dedicated loop and explicit shutdown
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            # Cleanly close asynchronous generators and transports
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            try:
+                loop.run_until_complete(loop.shutdown_default_executor())
+            except Exception:
+                pass
+            loop.close()
+            asyncio.set_event_loop(None)
+
+    # -----------------------------
+    # Async methods
+    # -----------------------------
     @classmethod
-    async def _list_tools_async(cls, tool_name, shuffle=False, rag=True):
+    async def _list_tools_async(cls, tool_name=None, shuffle=False, rag=True):
         async with Client(cls.config) as client:
             tool_list = await client.list_tools()
             tool_list = [{
@@ -55,12 +71,12 @@ class OsworldMcpClient:
                 "parameters": tool.inputSchema
             } for tool in tool_list]
 
-        if rag:
-            result = []
-            for tool in tool_list:
-                if tool_name and tool_name in tool['name']:
-                    result.append(tool)
+        if not rag:
+            return tool_list
 
+        # Filter or fallback logic
+        result = [t for t in tool_list if tool_name and tool_name in t["name"]]
+        if not result:
             exclude_apps = [
                 "libreoffice_calc",
                 "libreoffice_impress",
@@ -70,36 +86,38 @@ class OsworldMcpClient:
                 "google_chrome",
                 "thunderbird",
             ]
-            if not result:
-                for tool in tool_list:
-                    if not any(excl in tool['name'] for excl in exclude_apps):
-                        result.append(tool)
-            return result
-        else:
-            return tool_list
+            for t in tool_list:
+                if not any(ex in t["name"] for ex in exclude_apps):
+                    result.append(t)
 
-    @classmethod
-    def list_tools(cls, tool_name=None, shuffle=False, rag=True):
-        tool_list = cls._run(cls._list_tools_async(tool_name, shuffle, rag))
         if shuffle:
-            random.shuffle(tool_list)
-        print(tool_list)
-        return tool_list
+            random.shuffle(result)
+        return result
 
-    # ---------- call ----------
     @classmethod
     async def _call_tool_async(cls, name, params=None):
         async with Client(cls.config) as client:
-            response = await client.call_tool(name, params or {})
-            return response
+            return await client.call_tool(name, params or {})
+
+    # -----------------------------
+    # Public entrypoints
+    # -----------------------------
+    @classmethod
+    def list_tools(cls, tool_name=None, shuffle=False, rag=True):
+        tools = cls._run(cls._list_tools_async(tool_name, shuffle, rag))
+        print(tools)
+        return tools
 
     @classmethod
     def call_tool(cls, name, params=None):
-        response = cls._run(cls._call_tool_async(name, params))
-        print(response)
-        return response
+        result = cls._run(cls._call_tool_async(name, params))
+        print(result)
+        return result
 
 
+# -----------------------------
+# Example usage
+# -----------------------------
 if __name__ == "__main__":
     OsworldMcpClient.call_tool(
         "VSCodeTools_search_text",
