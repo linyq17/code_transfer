@@ -1,0 +1,107 @@
+import asyncio
+from fastmcp import Client
+import random
+
+
+class OsworldMcpClient:
+    config = {
+        "mcpServers": {
+            "osworld_mcp": {
+                "url": "http://localhost:9292/mcp",
+                "transport": "streamable-http"
+            },
+            "filesystem": {
+                "command": "npx",
+                "args": [
+                    "-y",
+                    "@modelcontextprotocol/server-filesystem",
+                    "/home/user",
+                ]
+            },
+            "git": {
+                "command": "uvx",
+                "args": [
+                    "mcp-server-git"
+                ]
+            }
+        }
+    }
+
+    # ---------- internal helper ----------
+    @staticmethod
+    def _run(coro):
+        """
+        Safely run an async coroutine, even if a loop already exists (e.g. in Jupyter).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # If inside a running loop (e.g. notebook), create a new one in a thread-safe way
+            return asyncio.run_coroutine_threadsafe(coro, loop).result()
+        else:
+            return asyncio.run(coro)
+
+    # ---------- tools ----------
+    @classmethod
+    async def _list_tools_async(cls, tool_name, shuffle=False, rag=True):
+        async with Client(cls.config) as client:
+            tool_list = await client.list_tools()
+            tool_list = [{
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.inputSchema
+            } for tool in tool_list]
+
+        if rag:
+            result = []
+            for tool in tool_list:
+                if tool_name and tool_name in tool['name']:
+                    result.append(tool)
+
+            exclude_apps = [
+                "libreoffice_calc",
+                "libreoffice_impress",
+                "libreoffice_writer",
+                "code",
+                "vlc",
+                "google_chrome",
+                "thunderbird",
+            ]
+            if not result:
+                for tool in tool_list:
+                    if not any(excl in tool['name'] for excl in exclude_apps):
+                        result.append(tool)
+            return result
+        else:
+            return tool_list
+
+    @classmethod
+    def list_tools(cls, tool_name=None, shuffle=False, rag=True):
+        tool_list = cls._run(cls._list_tools_async(tool_name, shuffle, rag))
+        if shuffle:
+            random.shuffle(tool_list)
+        print(tool_list)
+        return tool_list
+
+    # ---------- call ----------
+    @classmethod
+    async def _call_tool_async(cls, name, params=None):
+        async with Client(cls.config) as client:
+            response = await client.call_tool(name, params or {})
+            return response
+
+    @classmethod
+    def call_tool(cls, name, params=None):
+        response = cls._run(cls._call_tool_async(name, params))
+        print(response)
+        return response
+
+
+if __name__ == "__main__":
+    OsworldMcpClient.call_tool(
+        "VSCodeTools_search_text",
+        {"text": "files"}
+    )
